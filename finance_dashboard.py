@@ -465,10 +465,21 @@ with st.sidebar:
     </div>""", unsafe_allow_html=True)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
+# Auto-detect any .xlsx sitting next to this script (e.g. committed to the repo)
+_script_dir   = Path(__file__).parent
+_local_excels = sorted(_script_dir.glob("*.xlsx"))
+_auto_excel   = _local_excels[0] if _local_excels else None
+
 if load_btn: st.cache_data.clear()
-if uploaded_file:                               rows = load_excel(uploaded_file)
-elif excel_path and os.path.exists(excel_path): rows = load_excel(excel_path)
-else:                                           rows = get_baseline()
+if uploaded_file:
+    rows = load_excel(uploaded_file)
+elif excel_path and os.path.exists(excel_path):
+    rows = load_excel(excel_path)
+elif _auto_excel:
+    rows = load_excel(_auto_excel)
+    st.sidebar.info(f"📂 Auto-loaded: **{_auto_excel.name}**")
+else:
+    rows = get_baseline()
 
 df_all  = make_df(rows)
 df_filt = df_all[df_all['yr'].isin(year_filter)] if year_filter else df_all
