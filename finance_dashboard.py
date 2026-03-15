@@ -210,14 +210,34 @@ INCOME_2025 = [
 
 # ── Excel parser ──────────────────────────────────────────────────────────────
 CAT_MAP = {
+    # Food
     'food':'Food','restaurants':'Food','restaurant':'Food','dining':'Food','coffee':'Food',
+    # Groceries
     'groceries':'Groceries','grocery':'Groceries','supermarket':'Groceries',
+    # Shopping
     'shopping':'Shopping','general merchandise':'Shopping','electronics':'Shopping','vanmoof':'Shopping',
+    # Rent
     'rent':'Rent','bilt':'Rent',
-    'personal':'Personal','personal care':'Personal','online services':'Personal','subscription':'Personal',
-    'travel':'Travel','transportation':'Travel','airline':'Travel','hotel':'Travel','lyft':'Travel','uber':'Travel',
+    # Personal
+    'personal':'Personal','personal care':'Personal','online services':'Personal',
+    'subscription':'Personal','utilities':'Personal',
+    # Travel  (includes trip-name categories)
+    'travel':'Travel','transportation':'Travel','airline':'Travel','hotel':'Travel',
+    'lyft':'Travel','uber':'Travel','dubai':'Travel','goa':'Travel',
+    # Entertainment
     'entertainment':'Entertainment','movies':'Entertainment','spotify':'Entertainment',
+    # Other
+    'charity':'Other','unknown':'Other','other expenses':'Other','pb&j drive':'Other',
 }
+
+# Full month-name → number (handles "April'25", "July'25", etc.)
+MONTH_FULL = {
+    'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
+    'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12,
+    'january':1,'february':2,'march':3,'april':4,'june':6,
+    'july':7,'august':8,'september':9,'october':10,'november':11,'december':12,
+}
+
 def _norm(desc, bank):
     for kw, cat in CAT_MAP.items():
         if kw in str(desc).lower(): return cat
@@ -229,7 +249,8 @@ def _parse_sheet(df):
     try:
         hr = next((i for i,r in df.iterrows()
                    if 'date' in [str(v).lower().strip() for v in r.values]
-                   and any(x in [str(v).lower().strip() for v in r.values] for x in ['amount','amount2'])), None)
+                   and any(x in [str(v).lower().strip() for v in r.values]
+                           for x in ['amount','amount2'])), None)
         if hr is None: return None
         df.columns = [str(v).strip() for v in df.iloc[hr].values]
         df = df.iloc[hr+1:].reset_index(drop=True).dropna(how='all')
@@ -238,19 +259,29 @@ def _parse_sheet(df):
         for _, row in df.iterrows():
             amt = 0.0
             if 'amount2' in cols:
-                try: amt = float(str(row[cols['amount2']]).replace('$','').replace(',',''))
+                # Format: negative Amount + positive Amount2 (Jun 2024 onward)
+                try:
+                    v = float(str(row[cols['amount2']]).replace('$','').replace(',',''))
+                    if v > 0: amt = v
                 except: pass
             if amt == 0 and 'amount' in cols:
+                # Format: positive amounts (Jan–May 2024 style)
                 try:
                     v = float(str(row[cols['amount']]).replace('$','').replace(',',''))
-                    amt = abs(v) if v < 0 else 0
+                    if v != 0: amt = abs(v)
                 except: pass
             if amt <= 0: continue
             cat = 'Other'
-            if 'category' in cols and str(row[cols['category']]).strip() in CATS:
-                cat = str(row[cols['category']]).strip()
+            raw_cat = str(row.get(cols.get('category',''), '')).strip()
+            if raw_cat in CATS:
+                cat = raw_cat
             else:
-                cat = _norm(row.get(cols.get('description',''),''), row.get(cols.get('bankcategory',''),''))
+                mapped = CAT_MAP.get(raw_cat.lower())
+                if mapped:
+                    cat = mapped
+                else:
+                    cat = _norm(row.get(cols.get('description',''),''),
+                                row.get(cols.get('bankcategory',''),''))
             if amt >= 3000 and cat == 'Other': cat = 'Rent'
             totals[cat] += amt
             if 'income' in cols:
@@ -260,22 +291,48 @@ def _parse_sheet(df):
         return totals
     except: return None
 
+def _parse_xl(xl, known):
+    """Parse all month sheets from an ExcelFile into the known dict. Returns # new months."""
+    new = 0
+    for sh in xl.sheet_names:
+        # Regex handles: "Jan '24", "Jan'25", "April'25", "July'25", "Nov '25"
+        m = re.match(r"([A-Za-z]{3,9})[\s'\u2019\"]*(\d{2})\b", sh.strip())
+        if not m: continue
+        ms, ys = m.group(1).lower(), int(m.group(2))
+        mo = MONTH_FULL.get(ms)
+        if not mo: continue
+        yr = 2000 + ys
+        if (yr, mo) in known: continue
+        r = _parse_sheet(xl.parse(sh, header=None))
+        if r:
+            known[(yr, mo)] = dict(yr=yr, mo=mo, **r)
+            new += 1
+    return new
+
 @st.cache_data(show_spinner="Reading Excel…")
 def load_excel(src):
     from io import BytesIO
     try: xl = pd.ExcelFile(src if isinstance(src,(str,Path)) else BytesIO(src.read()))
     except Exception as e: st.sidebar.warning(f"Could not read: {e}"); return BASELINE.copy()
-    known = {(r['yr'],r['mo']):dict(r) for r in BASELINE}; new = 0
-    for sh in xl.sheet_names:
-        m = re.match(r'([A-Za-z]{3})\s*(\d{2})\b', sh.strip())
-        if not m: continue
-        ms, ys = m.group(1).lower(), int(m.group(2))
-        if ms not in MONTH_MAP: continue
-        mo, yr = MONTH_MAP[ms], 2000+ys
-        if (yr,mo) in known: continue
-        r = _parse_sheet(xl.parse(sh, header=None))
-        if r: known[(yr,mo)] = dict(yr=yr,mo=mo,**r); new += 1
+    known = {(r['yr'],r['mo']): dict(r) for r in BASELINE}
+    new = _parse_xl(xl, known)
     if new: st.sidebar.success(f"✓ {new} new month(s) loaded")
+    return sorted(known.values(), key=lambda r:(r['yr'],r['mo']))
+
+@st.cache_data(show_spinner="Reading Excel files…")
+def load_all_excels(paths: tuple):
+    """Merge all .xlsx files in the repo folder into one dataset."""
+    from io import BytesIO
+    known = {(r['yr'],r['mo']): dict(r) for r in BASELINE}
+    total_new = 0
+    for p in paths:
+        try:
+            xl = pd.ExcelFile(str(p))
+            total_new += _parse_xl(xl, known)
+        except Exception as e:
+            st.sidebar.warning(f"Could not read {Path(p).name}: {e}")
+    if total_new:
+        st.sidebar.success(f"✓ {total_new} month(s) loaded from {len(paths)} file(s)")
     return sorted(known.values(), key=lambda r:(r['yr'],r['mo']))
 
 @st.cache_data
@@ -475,9 +532,10 @@ if uploaded_file:
     rows = load_excel(uploaded_file)
 elif excel_path and os.path.exists(excel_path):
     rows = load_excel(excel_path)
-elif _auto_excel:
-    rows = load_excel(_auto_excel)
-    st.sidebar.info(f"📂 Auto-loaded: **{_auto_excel.name}**")
+elif _local_excels:
+    rows = load_all_excels(tuple(str(p) for p in _local_excels))
+    st.sidebar.info(f"📂 Auto-loaded **{len(_local_excels)} file(s)**: " +
+                    ", ".join(p.name for p in _local_excels))
 else:
     rows = get_baseline()
 
