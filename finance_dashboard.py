@@ -133,9 +133,9 @@ pio.templates["rb_dark"] = go.layout.Template(
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(gridcolor="rgba(255,255,255,0.04)", linecolor="rgba(255,255,255,0.06)",
-                   zeroline=False, tickfont=dict(size=12, color="#64748B", family=FONT), showgrid=False),
+                   zeroline=False, tickfont=dict(size=12, color="#94A3B8", family=FONT), showgrid=False),
         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", showline=False, zeroline=False,
-                   tickfont=dict(size=12, color="#64748B", family=FONT),
+                   tickfont=dict(size=12, color="#94A3B8", family=FONT),
                    tickprefix="$", separatethousands=True, showgrid=True),
         hoverlabel=dict(bgcolor="#0F1E35", font=dict(family=FONT, color="#E2E8F0", size=14),
                         bordercolor="rgba(59,130,246,0.4)"),
@@ -183,9 +183,9 @@ BASELINE = [
     dict(yr=2025,mo=7,  Food=244.77, Groceries=283.31, Shopping=651.73, Rent=3380.62, Personal=56.94,   Travel=0,       Entertainment=67.98,  Other=0,       Income=4571.74),
     dict(yr=2025,mo=8,  Food=0,      Groceries=0,      Shopping=0,      Rent=3250.00, Personal=0,       Travel=0,       Entertainment=0,      Other=0,       Income=0),
     dict(yr=2025,mo=9,  Food=201.45, Groceries=299.92, Shopping=189.11, Rent=3387.32, Personal=80.83,   Travel=46.90,   Entertainment=0,      Other=504.12,  Income=2658.32),
-    dict(yr=2025,mo=10, Food=72.94,  Groceries=318.58, Shopping=0,      Rent=3250.00, Personal=343.00,  Travel=1939.50, Entertainment=0,      Other=0,       Income=8822.58),
-    dict(yr=2025,mo=11, Food=131.16, Groceries=121.30, Shopping=285.24, Rent=3250.00, Personal=312.41,  Travel=1274.06, Entertainment=30.00,  Other=0,       Income=5097.38),
-    dict(yr=2025,mo=12, Food=241.76, Groceries=79.23,  Shopping=222.99, Rent=3414.80, Personal=389.29,  Travel=201.39,  Entertainment=34.00,  Other=1915.84, Income=1244.56),
+    dict(yr=2025,mo=10, Food=72.94,  Groceries=318.58, Shopping=0,      Rent=3250.00, Personal=343.00,  Travel=0,       Entertainment=0,      Other=1939.50, Income=8822.58),
+    dict(yr=2025,mo=11, Food=131.16, Groceries=121.30, Shopping=285.24, Rent=3250.00, Personal=312.41,  Travel=7.92,    Entertainment=30.00,  Other=1266.14, Income=5097.38),
+    dict(yr=2025,mo=12, Food=241.76, Groceries=79.23,  Shopping=222.99, Rent=3414.80, Personal=389.29,  Travel=114.71,  Entertainment=34.00,  Other=262.53,  Income=1244.56),
     dict(yr=2026,mo=1,  Food=246.84, Groceries=305.80, Shopping=291.85, Rent=50.00,   Personal=241.56,  Travel=0,       Entertainment=0,      Other=0,       Income=5579.14),
     dict(yr=2026,mo=2,  Food=254.25, Groceries=204.54, Shopping=1016.04,Rent=40.00,   Personal=738.72,  Travel=0,       Entertainment=0,      Other=0,       Income=5613.22),
 ]
@@ -321,18 +321,51 @@ def load_excel(src):
 
 @st.cache_data(show_spinner="Reading Excel files…")
 def load_all_excels(paths: tuple):
-    """Merge all .xlsx files in the repo folder into one dataset."""
-    from io import BytesIO
-    known = {(r['yr'],r['mo']): dict(r) for r in BASELINE}
-    total_new = 0
+    """Merge all .xlsx files — Excel data takes priority over BASELINE.
+    BASELINE income and rent are preserved when Excel shows $0."""
+    from_excel = {}
+    total_new  = 0
+    base_idx   = {(r['yr'],r['mo']): r for r in BASELINE}
+
     for p in paths:
         try:
             xl = pd.ExcelFile(str(p))
-            total_new += _parse_xl(xl, known)
+            for sh in xl.sheet_names:
+                m = re.match(r"([A-Za-z]{3,9})[\s'\u2019\"]*(\d{2})\b", sh.strip())
+                if not m: continue
+                ms, ys = m.group(1).lower(), int(m.group(2))
+                mo = MONTH_FULL.get(ms)
+                if not mo: continue
+                yr = 2000 + ys
+                r = _parse_sheet(xl.parse(sh, header=None))
+                if r:
+                    from_excel[(yr, mo)] = dict(yr=yr, mo=mo, **r)
+                    total_new += 1
         except Exception as e:
             st.sidebar.warning(f"Could not read {Path(p).name}: {e}")
+
+    # Build final dataset: Excel first, fill gaps with BASELINE
+    known = {}
+    all_keys = set(base_idx.keys()) | set(from_excel.keys())
+    for key in all_keys:
+        base = base_idx.get(key)
+        exc  = from_excel.get(key)
+        if exc and base:
+            merged = dict(exc)
+            # Preserve BASELINE income if Excel has none
+            if merged.get('Income', 0) == 0 and base.get('Income', 0) > 0:
+                merged['Income'] = base['Income']
+            # Preserve BASELINE rent if Excel pivot didn't capture full Bilt rent
+            if merged.get('Rent', 0) < 1000 and base.get('Rent', 0) >= 1000:
+                merged['Rent'] = base['Rent']
+            known[key] = merged
+        elif exc:
+            known[key] = exc
+        else:
+            known[key] = dict(base)
+
     if total_new:
-        st.sidebar.success(f"✓ {total_new} month(s) loaded from {len(paths)} file(s)")
+        st.sidebar.success(f"✓ {total_new} sheet(s) loaded from {len(paths)} file(s)")
     return sorted(known.values(), key=lambda r:(r['yr'],r['mo']))
 
 @st.cache_data
@@ -365,70 +398,74 @@ def kpi(label, value, sub="", delta=None, good=True, accent="#3B82F6", icon=""):
             border-radius:14px;padding:24px 26px 22px;height:100%;
             box-shadow:0 0 0 1px rgba(0,0,0,0.3),0 8px 32px rgba(0,0,0,0.4);">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-    <div style="font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;">{label}</div>
-    <div style="font-size:20px;opacity:0.5;">{icon}</div>
+    <div style="font-size:12px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.12em;">{label}</div>
+    <div style="font-size:20px;opacity:0.6;">{icon}</div>
   </div>
-  <div style="font-size:38px;font-weight:800;color:#E2E8F0;letter-spacing:-2px;line-height:1;font-family:'DM Mono',monospace;">{value}</div>
-  <div style="font-size:14px;color:#64748B;margin-top:8px;line-height:1.5;">{sub}</div>
+  <div style="font-size:38px;font-weight:800;color:#F1F5F9;letter-spacing:-2px;line-height:1;font-family:'DM Mono',monospace;">{value}</div>
+  <div style="font-size:14px;color:#94A3B8;margin-top:8px;line-height:1.5;">{sub}</div>
   {d}
 </div>"""
 
 def section_head(title, sub=""):
-    s = f'<span style="font-size:13px;color:#64748B;font-weight:400;margin-left:8px;">{sub}</span>' if sub else ""
+    s = f'<span style="font-size:13px;color:#94A3B8;font-weight:400;margin-left:8px;">{sub}</span>' if sub else ""
     return f"""<div style="margin:32px 0 16px;display:flex;align-items:center;gap:10px;">
   <div style="width:3px;height:20px;background:linear-gradient(180deg,#3B82F6,#1D4ED8);border-radius:2px;flex-shrink:0;"></div>
-  <span style="font-size:17px;font-weight:700;color:#E2E8F0;letter-spacing:-0.3px;">{title}</span>{s}
+  <span style="font-size:17px;font-weight:700;color:#F1F5F9;letter-spacing:-0.3px;">{title}</span>{s}
 </div>"""
 
 def income_table(rows, total_val):
     rhtml = "".join(f"""
 <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
-  <td style="padding:14px 18px;font-size:14px;color:#CBD5E1;font-weight:500;">{r[0]}</td>
-  <td style="padding:14px 18px;font-size:13px;color:#64748B;">{r[1]}</td>
-  <td style="padding:14px 18px;font-size:15px;color:#E2E8F0;font-weight:600;text-align:right;font-family:'DM Mono',monospace;">{r[2]}</td>
+  <td style="padding:14px 18px;font-size:14px;color:#E2E8F0;font-weight:500;">{r[0]}</td>
+  <td style="padding:14px 18px;font-size:13px;color:#94A3B8;">{r[1]}</td>
+  <td style="padding:14px 18px;font-size:15px;color:#F1F5F9;font-weight:600;text-align:right;font-family:'DM Mono',monospace;">{r[2]}</td>
 </tr>""" for r in rows)
     return f"""
 <div style="background:#0A1628;border:1px solid rgba(59,130,246,0.15);border-radius:14px;overflow:hidden;
             box-shadow:0 8px 32px rgba(0,0,0,0.4);">
   <table style="width:100%;border-collapse:collapse;">
     <thead><tr style="background:#060C18;border-bottom:1px solid rgba(59,130,246,0.12);">
-      <th style="padding:13px 18px;text-align:left;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;">Source</th>
-      <th style="padding:13px 18px;text-align:left;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;">Detail</th>
-      <th style="padding:13px 18px;text-align:right;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;">Amount</th>
+      <th style="padding:13px 18px;text-align:left;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.12em;">Source</th>
+      <th style="padding:13px 18px;text-align:left;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.12em;">Detail</th>
+      <th style="padding:13px 18px;text-align:right;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.12em;">Amount</th>
     </tr></thead>
     <tbody>{rhtml}</tbody>
     <tfoot><tr style="background:rgba(52,211,153,0.07);border-top:1px solid rgba(52,211,153,0.2);">
-      <td colspan="2" style="padding:16px 18px;font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;">Total Gross Income</td>
+      <td colspan="2" style="padding:16px 18px;font-size:12px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.12em;">Total Gross Income</td>
       <td style="padding:16px 18px;font-size:26px;font-weight:800;color:#34D399;text-align:right;font-family:'DM Mono',monospace;letter-spacing:-1px;">{total_val}</td>
     </tr></tfoot>
   </table>
 </div>"""
 
 def exp_table(df_rows, show_income=False):
-    inc_th = '<th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.1em;white-space:nowrap;">Net Income</th>' if show_income else ""
-    cat_ths = "".join(f'<th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:{CAT_COLORS[c]};opacity:0.85;text-transform:uppercase;letter-spacing:0.08em;white-space:nowrap;">{c}</th>' for c in CATS)
+    inc_th = '<th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.1em;white-space:nowrap;">Take-Home</th>' if show_income else ""
+    cat_ths = "".join(f'<th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:{CAT_COLORS[c]};text-transform:uppercase;letter-spacing:0.08em;white-space:nowrap;">{c}</th>' for c in CATS)
     head = f"""<thead><tr style="background:#060C18;border-bottom:1px solid rgba(59,130,246,0.1);">
-      <th style="padding:12px 14px;text-align:left;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.1em;">Month</th>
+      <th style="padding:12px 14px;text-align:left;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.1em;">Month</th>
       {cat_ths}
-      <th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.1em;white-space:nowrap;">Total</th>
+      <th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.1em;white-space:nowrap;">Ex-Rent</th>
+      <th style="padding:12px 14px;text-align:right;font-size:11px;font-weight:700;color:#F1F5F9;text-transform:uppercase;letter-spacing:0.1em;white-space:nowrap;">Total</th>
       {inc_th}
     </tr></thead>"""
     rows_html = ""
     for i, r in enumerate(df_rows.itertuples()):
         bg = "rgba(255,255,255,0.01)" if i%2==0 else "rgba(255,255,255,0.028)"
+        ex_rent = r.total - getattr(r, 'Rent', 0)
         cat_tds = "".join(
             f'<td style="padding:11px 14px;text-align:right;font-size:14px;color:{CAT_COLORS[c]};font-family:\'DM Mono\',monospace;">'
             f'{fmt(getattr(r,c)) if getattr(r,c)>0 else "—"}</td>' for c in CATS)
         inc_td = (f'<td style="padding:11px 14px;text-align:right;font-size:14px;font-weight:600;color:#34D399;font-family:\'DM Mono\',monospace;">'
                   f'{fmt(r.Income) if r.Income>0 else "—"}</td>') if show_income else ""
         rows_html += (f'<tr style="background:{bg};border-bottom:1px solid rgba(255,255,255,0.04);">'
-                      f'<td style="padding:11px 14px;font-size:14px;font-weight:600;color:#CBD5E1;white-space:nowrap;">{r.label}</td>'
+                      f'<td style="padding:11px 14px;font-size:14px;font-weight:600;color:#E2E8F0;white-space:nowrap;">{r.label}</td>'
                       f'{cat_tds}'
-                      f'<td style="padding:11px 14px;text-align:right;font-size:15px;font-weight:700;color:#E2E8F0;font-family:\'DM Mono\',monospace;white-space:nowrap;">{fmt(r.total)}</td>'
+                      f'<td style="padding:11px 14px;text-align:right;font-size:14px;font-weight:600;color:#94A3B8;font-family:\'DM Mono\',monospace;white-space:nowrap;">{fmt(ex_rent)}</td>'
+                      f'<td style="padding:11px 14px;text-align:right;font-size:15px;font-weight:700;color:#F1F5F9;font-family:\'DM Mono\',monospace;white-space:nowrap;">{fmt(r.total)}</td>'
                       f'{inc_td}</tr>')
     # Totals footer
-    totals = {c: df_rows[c].sum() for c in CATS}
-    grand  = df_rows['total'].sum()
+    totals   = {c: df_rows[c].sum() for c in CATS}
+    grand    = df_rows['total'].sum()
+    ex_rent_total = grand - totals.get('Rent', 0)
     inc_total = df_rows['Income'].sum() if show_income and 'Income' in df_rows.columns else 0
     cat_tds_tot = "".join(
         f'<td style="padding:13px 14px;text-align:right;font-size:14px;font-weight:700;color:{CAT_COLORS[c]};font-family:\'DM Mono\',monospace;">'
@@ -436,9 +473,10 @@ def exp_table(df_rows, show_income=False):
     inc_td_tot = (f'<td style="padding:13px 14px;text-align:right;font-size:15px;font-weight:800;color:#34D399;font-family:\'DM Mono\',monospace;">'
                   f'{fmt(inc_total)}</td>') if show_income else ""
     footer = (f'<tr style="background:rgba(59,130,246,0.08);border-top:2px solid rgba(59,130,246,0.2);">'
-              f'<td style="padding:13px 14px;font-size:13px;font-weight:800;color:#94A3B8;text-transform:uppercase;letter-spacing:0.1em;">TOTAL</td>'
+              f'<td style="padding:13px 14px;font-size:13px;font-weight:800;color:#CBD5E1;text-transform:uppercase;letter-spacing:0.1em;">TOTAL</td>'
               f'{cat_tds_tot}'
-              f'<td style="padding:13px 14px;text-align:right;font-size:16px;font-weight:800;color:#E2E8F0;font-family:\'DM Mono\',monospace;">{fmt(grand)}</td>'
+              f'<td style="padding:13px 14px;text-align:right;font-size:15px;font-weight:800;color:#94A3B8;font-family:\'DM Mono\',monospace;">{fmt(ex_rent_total)}</td>'
+              f'<td style="padding:13px 14px;text-align:right;font-size:16px;font-weight:800;color:#F1F5F9;font-family:\'DM Mono\',monospace;">{fmt(grand)}</td>'
               f'{inc_td_tot}</tr>')
     return (f'<div style="background:#0A1628;border:1px solid rgba(59,130,246,0.12);border-radius:14px;'
             f'overflow:hidden;overflow-x:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);">'
@@ -447,9 +485,9 @@ def exp_table(df_rows, show_income=False):
 
 def ax(fig):
     fig.update_xaxes(showgrid=False, linecolor="rgba(255,255,255,0.06)",
-                     tickfont=dict(size=12, color="#64748B", family=FONT))
+                     tickfont=dict(size=12, color="#94A3B8", family=FONT))
     fig.update_yaxes(gridcolor="rgba(255,255,255,0.04)", showline=False,
-                     tickfont=dict(size=12, color="#64748B", family=FONT),
+                     tickfont=dict(size=12, color="#94A3B8", family=FONT),
                      tickprefix="$", separatethousands=True)
     return fig
 
@@ -509,16 +547,16 @@ with st.sidebar:
     st.markdown('<div style="font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:8px;">Filter Years</div>', unsafe_allow_html=True)
     year_filter = st.multiselect("", [2024,2025,2026], default=[2024,2025,2026], label_visibility="collapsed")
     st.divider()
-    st.markdown("""<div style="font-size:13px;color:#94A3B8;line-height:2.2;">
-      <div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:8px;">Verified Income</div>
-      <span style="color:#94A3B8;">2024 AGI (Form 1040)</span><br>
+    st.markdown("""<div style="font-size:13px;color:#CBD5E1;line-height:2.2;">
+      <div style="font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:8px;">Verified Income</div>
+      <span style="color:#CBD5E1;">2024 AGI (Form 1040)</span><br>
       <span style="color:#60A5FA;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;">$65,626</span><br><br>
-      <span style="color:#94A3B8;">2025 W-2 Gross</span><br>
+      <span style="color:#CBD5E1;">2025 W-2 Gross</span><br>
       <span style="color:#60A5FA;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;">$88,120</span><br><br>
-      <span style="color:#94A3B8;">2025 Investments</span><br>
+      <span style="color:#CBD5E1;">2025 Investments</span><br>
       <span style="color:#34D399;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;">$38,237</span><br><br>
-      <span style="color:#94A3B8;">2025 Total Gross</span><br>
-      <span style="color:#E2E8F0;font-family:'DM Mono',monospace;font-size:17px;font-weight:800;">$126,357</span>
+      <span style="color:#CBD5E1;">2025 Total Gross</span><br>
+      <span style="color:#F1F5F9;font-family:'DM Mono',monospace;font-size:17px;font-weight:800;">$126,357</span>
     </div>""", unsafe_allow_html=True)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
